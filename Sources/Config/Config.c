@@ -2,7 +2,7 @@
 #include "_Generated/ConfigStr.h"
 #include <stdbool.h>
 #include <stdio.h>
-#include <Winuser.h>
+#include <winuser.h>
 #include <stdlib.h>
 #include <debugapi.h>
 #include "Utils/Error.h"

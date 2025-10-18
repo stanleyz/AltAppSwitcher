@@ -1,5 +1,7 @@
 #include <windows.h>
-#include <Tlhelp32.h>
+#include "Message.h"
+#include <tlhelp32.h>
+#include "Error.h"
 #include "Utils/MessageDef.h"
 
 static void PostAASMsg(int msg)

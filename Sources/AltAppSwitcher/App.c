@@ -20,15 +20,15 @@
 #include <windowsx.h>
 #include <unistd.h>
 // https://stackoverflow.com/questions/71437203/proper-way-of-activating-a-window-using-winapi
-#include <Initguid.h>
+#include <initguid.h>
 #include <uiautomationclient.h>
 #include <gdiplus/gdiplusenums.h>
-#include <PropKey.h>
+#include <propkey.h>
 #include <winuser.h>
 #include <winnt.h>
 #include <pthread.h>
 #include <time.h>
-#include <Shobjidl.h>
+#include <shobjidl.h>
 #include "AppxPackaging.h"
 #undef COBJMACROS
 #include "Config/Config.h"
@@ -1124,11 +1124,14 @@ static BOOL FillWinGroups(HWND hwnd, LPARAM lParam)
             {
                 HICON hi = NULL;
                 (void)hi;
-                LoadIconWithScaleDown(NULL, (PCWSTR)IDI_APPLICATION, 256, 256, &hi);
-                ICONINFO iconinfo;
-                GetIconInfo(hi, &iconinfo);
-                hbm = iconinfo.hbmColor;
-                DestroyIcon(hi);
+                // Fallback to LoadIcon for better compatibility
+                hi = LoadIcon(NULL, IDI_APPLICATION);
+                if (hi) {
+                    ICONINFO iconinfo;
+                    GetIconInfo(hi, &iconinfo);
+                    hbm = iconinfo.hbmColor;
+                    DestroyIcon(hi);
+                }
             }
 
             // Creates a gdi bitmap from the win base api bitmap
@@ -1393,49 +1396,96 @@ static void ApplySwitchApp(const SWinGroup* winGroup)
     DWORD ret; (void)ret;
 
     int winCount = (int)winGroup->_WindowCount;
-
-    for (int i = winCount - 1; i >= 0 ; i--)
+    
+    // Cache window thread IDs to avoid repeated GetWindowThreadProcessId calls
+    DWORD windowThreads[64];
+    bool validWindows[64];
+    bool isUWPApp = false;
+    
+    // Pre-validate windows and cache thread IDs
+    for (int i = 0; i < winCount; i++)
     {
-        const HWND win = winGroup->_Windows[Modulo(i + 1, winCount)];
-        RestoreWin(win);
+        const HWND win = winGroup->_Windows[i];
+        validWindows[i] = IsWindow(win);
+        if (validWindows[i]) {
+            windowThreads[i] = GetWindowThreadProcessId(win, NULL);
+            
+            // Check if this is a UWP app by examining window class
+            if (!isUWPApp) {
+                static char className[64];
+                GetClassName(win, className, 64);
+                isUWPApp = !strcmp("ApplicationFrameWindow", className) || 
+                          !strcmp("Windows.UI.Core.CoreWindow", className);
+            }
+        } else {
+            windowThreads[i] = 0;
+        }
     }
 
-    HWND prev = HWND_TOP;
-    HDWP dwp = BeginDeferWindowPos(winGroup->_WindowCount);
-    ASSERT(dwp != 0);
+    // Restore windows first
     for (int i = winCount - 1; i >= 0 ; i--)
     {
         const HWND win = winGroup->_Windows[Modulo(i + 1, winCount)];
-        if (!IsWindow(win))
-            continue;
-#if 0
-        UIASetFocus(win, UIA);
-#endif
+        if (validWindows[Modulo(i + 1, winCount)]) {
+            RestoreWin(win);
+        }
+    }
 
-        // This seems more consistent than SetFocus
-        // Check if this works with focus when closing multiple win
-        DWORD targetWinThread = GetWindowThreadProcessId(win, NULL);
-        (void)targetWinThread;
-        ret = AttachThreadInput(targetWinThread, curThread, TRUE);
-        // ASSERT(ret != 0);
+    // For UWP apps, use a simplified approach that avoids expensive thread operations
+    if (isUWPApp && winCount > 0)
+    {
+        // For UWP apps, just bring the main window to front and set focus
+        const HWND mainWin = winGroup->_Windows[Modulo(1, winCount)];
+        if (IsWindow(mainWin)) {
+            SetWindowPos(mainWin, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+            SetForegroundWindow(mainWin);
+            SetFocus(mainWin);
+        }
+        return;
+    }
+
+    // For regular Win32 apps, use the original approach but with cached thread IDs
+    HWND prev = HWND_TOP;
+    HDWP dwp = BeginDeferWindowPos(winGroup->_WindowCount);
+    if (dwp == 0) return; // Handle failure gracefully
+    
+    for (int i = winCount - 1; i >= 0 ; i--)
+    {
+        const int idx = Modulo(i + 1, winCount);
+        const HWND win = winGroup->_Windows[idx];
+        if (!validWindows[idx])
+            continue;
+
+        // Use cached thread ID
+        DWORD targetWinThread = windowThreads[idx];
+        if (targetWinThread == 0) continue;
+        
+        // Only attach thread input if threads are different
+        if (targetWinThread != curThread) {
+            ret = AttachThreadInput(targetWinThread, curThread, TRUE);
+            // Don't assert on failure - some apps don't allow this
+        }
 
         dwp = DeferWindowPos(dwp, win, prev, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
-        // ASSERT(dwp != 0);
+        if (dwp == 0) break; // Handle failure
         prev = win;
     }
 
-    ret = EndDeferWindowPos(dwp);
-    // ASSERT(ret != 0);
+    if (dwp != 0) {
+        ret = EndDeferWindowPos(dwp);
+    }
 
+    // Detach thread inputs
     for (int i = winCount - 1; i >= 0 ; i--)
     {
-        const HWND win = winGroup->_Windows[Modulo(i + 1, winCount)];
-        if (!IsWindow(win))
+        const int idx = Modulo(i + 1, winCount);
+        if (!validWindows[idx])
             continue;
-        DWORD targetWinThread = GetWindowThreadProcessId(win, NULL);
-        (void)targetWinThread;
-        ret = AttachThreadInput(targetWinThread, curThread, FALSE);
-        // ASSERT(ret != 0);
+            
+        DWORD targetWinThread = windowThreads[idx];
+        if (targetWinThread != 0 && targetWinThread != curThread) {
+            ret = AttachThreadInput(targetWinThread, curThread, FALSE);
+        }
     }
 }
 
@@ -1451,12 +1501,36 @@ static DWORD WorkerThread(LPVOID data)
     EnterCriticalSection(&appData->_WorkerCS);
     appData->_WorkerWin = window;
     LeaveCriticalSection(&appData->_WorkerCS);
+    
     MSG msg = {};
-    while (GetMessage(&msg, NULL, 0, 0) > 0)
+    DWORD startTime = GetTickCount();
+    const DWORD timeout = 2000; // 2 second timeout
+    
+    while (true)
     {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DWORD currentTime = GetTickCount();
+        if (currentTime - startTime > timeout) {
+            // Timeout reached, exit thread
+            break;
+        }
+        
+        DWORD waitResult = MsgWaitForMultipleObjects(0, NULL, FALSE, 100, QS_ALLINPUT);
+        if (waitResult == WAIT_TIMEOUT) {
+            continue; // Check timeout and continue
+        }
+        
+        if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            
+            // Reset timeout after processing a message
+            startTime = GetTickCount();
+        }
     }
+    
     EnterCriticalSection(&appData->_WorkerCS);
     appData->_WorkerWin = NULL;
     LeaveCriticalSection(&appData->_WorkerCS);
@@ -1471,9 +1545,19 @@ static void ApplyWithTimeout(SAppData* appData, unsigned int msg)
 
     DWORD tid;
     HANDLE ht = CreateThread(NULL, 0, WorkerThread, (void*)appData, 0, &tid);
-    ASSERT(ht != NULL);
+    if (ht == NULL) {
+        // Fallback to direct application if thread creation fails
+        if (msg == MSG_APPLY_APP) {
+            ApplySwitchApp(&appData->_WinGroups._Data[appData->_Selection]);
+        } else if (msg == MSG_APPLY_APP_MOUSE) {
+            ApplySwitchApp(&appData->_WinGroups._Data[appData->_MouseSelection]);
+        }
+        return;
+    }
 
-    while (true)
+    // Reduced timeout for initialization
+    DWORD initStart = GetTickCount();
+    while (GetTickCount() - initStart < 500) // 500ms timeout
     {
         if (TryEnterCriticalSection(&appData->_WorkerCS))
         {
@@ -1482,7 +1566,25 @@ static void ApplyWithTimeout(SAppData* appData, unsigned int msg)
             if (initialized)
                 break;
         }
-        usleep(100);
+        Sleep(10); // Use Sleep instead of usleep for better performance
+    }
+
+    // Check if initialization succeeded
+    bool workerReady = false;
+    if (TryEnterCriticalSection(&appData->_WorkerCS)) {
+        workerReady = appData->_WorkerWin != NULL;
+        LeaveCriticalSection(&appData->_WorkerCS);
+    }
+    
+    if (!workerReady) {
+        // Worker thread failed to initialize, use direct approach
+        CloseHandle(ht);
+        if (msg == MSG_APPLY_APP) {
+            ApplySwitchApp(&appData->_WinGroups._Data[appData->_Selection]);
+        } else if (msg == MSG_APPLY_APP_MOUSE) {
+            ApplySwitchApp(&appData->_WinGroups._Data[appData->_MouseSelection]);
+        }
+        return;
     }
 
     HWND fgWin = GetForegroundWindow();
@@ -1491,13 +1593,12 @@ static void ApplyWithTimeout(SAppData* appData, unsigned int msg)
     DWORD ret = 0; (void)ret;
 
     ret = SetForegroundWindow(appData->_WorkerWin);
-    // ASSERT(ret != 0);
 
     SendNotifyMessage(appData->_WorkerWin, msg, 0, 0);
 
-    time_t start;
-    time(&start);
-    while (true)
+    // Reduced overall timeout
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < 500) // 500ms timeout instead of 1000ms
     {
         if (TryEnterCriticalSection(&appData->_WorkerCS))
         {
@@ -1506,13 +1607,11 @@ static void ApplyWithTimeout(SAppData* appData, unsigned int msg)
             if (done)
                 break;
         }
-        time_t now;
-        time(&now);
-        const double dt = difftime(now, start);
-        if (dt > 1.0)
-            break;
+        Sleep(10);
     }
 
+    // Wait for thread to complete with timeout
+    WaitForSingleObject(ht, 200); // 200ms max wait
     CloseHandle(ht);
 }
 #endif

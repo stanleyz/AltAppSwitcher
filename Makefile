@@ -21,16 +21,19 @@ SOURCEDIR = $(ROOTDIR)/Sources
 OBJDIR = $(BUILDDIR)/Objects
 AASBUILDDIR = $(BUILDDIR)/AAS
 INSTALLERBUILDDIR = $(BUILDDIR)/Installer
-SDKDIR = $(ROOTDIR)/SDK/Headers
+SDKDIR = $(ROOTDIR)/SDK/headers
 LIBDIR = $(ROOTDIR)/SDK/Libs/$(ARCH)
 INCLUDEDIR = $(ROOTDIR)/Sources
 
 # Common var
-CC = $(ARCH)-w64-mingw32-clang
-IDIRS = -I $(ROOTDIR)/SDK/Headers -I $(ROOTDIR)/Sources -I $(ROOTDIR)/SDK/Sources
+CC=$(ARCH)-w64-mingw32-gcc
+MINGW_PREFIX = /home/linuxbrew/.linuxbrew/Cellar/mingw-w64/13.0.0_2/toolchain-$(ARCH)
+MINGW_INCLUDE = $(MINGW_PREFIX)/$(ARCH)-w64-mingw32/include
+MINGW_LIB = $(MINGW_PREFIX)/$(ARCH)-w64-mingw32/lib
+IDIRS = -I $(ROOTDIR)/SDK/headers -I $(ROOTDIR)/Sources -I $(ROOTDIR)/SDK/Sources
 LDIRS = -L $(LIBDIR) -L $(LIBDIR)/curl
 LFLAGS = -static -static-libgcc -Werror
-CFLAGS = -Wall -D ARCH_$(ARCH)=1 -target $(ARCH)-mingw64 -Werror
+CFLAGS = -Wall -D ARCH_$(ARCH)=1 -Werror
 
 ifeq ($(CONF), Debug)
 CFLAGS += -g3
@@ -60,8 +63,8 @@ GUIOBJECTS = $(filter $(OBJDIR)/Sources/Utils/GUI%, $(ALLOBJECTS))
 SDKOBJECTS = $(filter $(OBJDIR)/SDK%, $(ALLOBJECTS))
 COMMONOBJECTS = $(ERROROBJECTS) $(FILEOBJECTS) $(MSGOBJECTS) $(SDKOBJECTS)
 
-AASLIBS = -l dwmapi -l User32 -l Gdi32 -l Gdiplus -l shlwapi -l pthread -l Ole32 -l Comctl32
-SETTINGSLIB = -l Comctl32 -l Gdi32
+AASLIBS = -l dwmapi -l user32 -l gdi32 -l gdiplus -l shlwapi -l pthread -l ole32 -l comctl32 -l shell32 -l uuid -l oleaut32 -l kernel32 -l rpcrt4
+SETTINGSLIB = -l comctl32 -l gdi32
 UPDATERLIBS = -l zip -l zlib -l bcrypt -l curl -l curl.dll
 
 AASASSETS = $(patsubst $(ROOTDIR)/Assets/AAS/%, $(AASBUILDDIR)/%, $(wildcard $(ROOTDIR)/Assets/AAS/*))
@@ -87,39 +90,39 @@ deploy: default $(AASARCHIVE)
 
 # Directory targets:
 directories:
-	python ./AAS.py MakeDirs $(CONF) $(ARCH)
+	python3 ./AAS.py MakeDirs $(CONF) $(ARCH)
 
 # Deploy targets:
 $(AASARCHIVE): $(ALLAAS)
-	python ./AAS.py MakeArchive $(BUILDDIR)/AAS $@
+	python3 ./AAS.py MakeArchive $(BUILDDIR)/AAS $@
 
 # Compile object targets:
 # see 4.12.1 Syntax of Static Pattern Rules
 $(ALLOBJECTS): $(OBJDIR)/%.o: $(ROOTDIR)/%.c $(ALLH)
-	$(CC) $(CFLAGS) $(IDIRS) -MJ $@.json -c $< -o $@
+	$(CC) $(CFLAGS) $(IDIRS) -c $< -o $@
 
 # Build exe targets (link):
 $(AASBUILDDIR)/AltAppSwitcher.exe: $(AASOBJECTS) $(CONFIGOBJECTS) $(COMMONOBJECTS)
-	$(CC) $(LFLAGS) $(LDIRS) $(AASLIBS) $^ -o $@
+	$(CC) $(LFLAGS) $(LDIRS) $^ $(AASLIBS) -o $@
 
 $(AASBUILDDIR)/Settings.exe: $(SETTINGSOBJECTS) $(CONFIGOBJECTS) $(COMMONOBJECTS) $(GUIOBJECTS)
-	$(CC) $(LFLAGS) $(LDIRS) $(SETTINGSLIB) $^ -o $@
+	$(CC) $(LFLAGS) $(LDIRS) $^ $(SETTINGSLIB) -o $@
 
 $(AASBUILDDIR)/Updater.exe: $(UPDATEROBJECTS) $(COMMONOBJECTS)
-	$(CC) $(LFLAGS) $(LDIRS) $(UPDATERLIBS) $^ -o $@
+	$(CC) $(LFLAGS) $(LDIRS) $^ $(UPDATERLIBS) -o $@
 
 # Assets:
 $(AASASSETS): $(AASBUILDDIR)/%: $(ROOTDIR)/Assets/AAS/%
-	python ./AAS.py Copy "$<" "$@"
+	python3 ./AAS.py Copy "$<" "$@"
 
 # Dll:
 $(DLL): $(AASBUILDDIR)/%: $(ROOTDIR)/SDK/Dll/$(ARCH)/%
-	python ./AAS.py Copy "$<" "$@"
+	python3 ./AAS.py Copy "$<" "$@"
 
 # Make compile_command.json (clangd)
 $(SOURCEDIR)/compile_commands.json: $(ALLOBJECTS)
-	python ./AAS.py MakeCompileCommands $@ $(subst .o,.o.json, $^)
+	python3 ./AAS.py MakeCompileCommands $@ $(subst .o,.o.json, $^)
 
 # Other targets:
 clean:
-	python ./AAS.py Clean
+	python3 ./AAS.py Clean
