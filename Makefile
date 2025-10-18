@@ -37,6 +37,7 @@ CFLAGS = -Wall -D ARCH_$(ARCH)=1 -Werror
 
 ifeq ($(CONF), Debug)
 CFLAGS += -g3
+LFLAGS += -mwindows
 else
 CFLAGS += -O3
 LFLAGS += -mwindows

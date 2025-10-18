@@ -250,8 +250,10 @@ static void DeleteGUIData(GUIData* guiData)
 static void FitParentWindow(const GUIData* gui)
 {
     const int center[2] = { GetSystemMetrics(SM_CXSCREEN) / 2, GetSystemMetrics(SM_CYSCREEN) / 2 };
-    RECT r = { center[0] - WIDTH / 2, center[1] - gui->_Cell._Y / 2,
-        center[0] + WIDTH / 2, center[1] + gui->_Cell._Y / 2 };
+    // Add padding to ensure all controls including the Apply button are visible
+    const int totalHeight = gui->_Cell._Y + WIN_PAD * 2;
+    RECT r = { center[0] - WIDTH / 2, center[1] - totalHeight / 2,
+        center[0] + WIDTH / 2, center[1] + totalHeight / 2 };
     AdjustWindowRect(&r, (DWORD)GetWindowLong(gui->_Parent, GWL_STYLE), false);
     SetWindowPos(gui->_Parent, 0, r.left, r.top, r.right - r.left, r.bottom - r.top, 0);
 }

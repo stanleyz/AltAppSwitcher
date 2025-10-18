@@ -35,11 +35,20 @@
 #include "Utils/Error.h"
 #include "Utils/MessageDef.h"
 #include "Utils/File.h"
+#include <shellapi.h>
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK TrayWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 #define MEM_INIT(ARG) memset(&ARG, 0,  sizeof(ARG))
 
 #define ASYNC_APPLY
+
+// Tray constants
+#define TRAY_CLASS_NAME "AltAppSwitcherTray"
+#define TRAY_ICON_ID 1
+#define WM_TRAYICON (WM_USER + 100)
+#define ID_TRAY_SETTINGS 1001
+#define ID_TRAY_EXIT 1002
 
 typedef struct SWinGroup
 {
@@ -123,6 +132,7 @@ typedef struct SUWPIconMap
 typedef struct SAppData
 {
     HWND _MainWin;
+    HWND _TrayWin;
     HINSTANCE _Instance;
     Mode _Mode;
     int _Selection;
@@ -137,6 +147,7 @@ typedef struct SAppData
     CRITICAL_SECTION _WorkerCS;
     HANDLE _WorkerWin;
     HMONITOR _MouseMonitor;
+    NOTIFYICONDATA _TrayIconData;
 } SAppData;
 
 typedef struct SFoundWin
@@ -2088,6 +2099,87 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+// Tray window procedure for handling system tray events
+LRESULT CALLBACK TrayWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    static SAppData* appData = NULL;
+    
+    switch (uMsg)
+    {
+    case WM_CREATE:
+    {
+        appData = (SAppData*)((CREATESTRUCTA*)lParam)->lpCreateParams;
+        
+        // Initialize tray icon
+        MEM_INIT(appData->_TrayIconData);
+        appData->_TrayIconData.cbSize = sizeof(NOTIFYICONDATA);
+        appData->_TrayIconData.hWnd = hwnd;
+        appData->_TrayIconData.uID = TRAY_ICON_ID;
+        appData->_TrayIconData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        appData->_TrayIconData.uCallbackMessage = WM_TRAYICON;
+        appData->_TrayIconData.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+        strcpy_s(appData->_TrayIconData.szTip, sizeof(appData->_TrayIconData.szTip), "AltAppSwitcher");
+        
+        Shell_NotifyIcon(NIM_ADD, &appData->_TrayIconData);
+        return 0;
+    }
+    case WM_TRAYICON:
+    {
+        if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)
+        {
+            POINT pt;
+            GetCursorPos(&pt);
+            
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenu(hMenu, MF_STRING, ID_TRAY_SETTINGS, "Settings");
+            AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, "Exit");
+            
+            SetForegroundWindow(hwnd);
+            TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(hMenu);
+        }
+        return 0;
+    }
+    case WM_COMMAND:
+    {
+        switch (LOWORD(wParam))
+        {
+        case ID_TRAY_SETTINGS:
+        {
+            // Launch Settings.exe
+            char settingsPath[MAX_PATH] = {};
+            GetModuleFileName(NULL, settingsPath, MAX_PATH);
+            char* lastSlash = strrchr(settingsPath, '\\');
+            if (lastSlash)
+            {
+                strcpy(lastSlash + 1, "Settings.exe");
+                STARTUPINFO si = {};
+                PROCESS_INFORMATION pi = {};
+                CreateProcess(NULL, settingsPath, 0, 0, false, 0, 0, 0, &si, &pi);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+            }
+            break;
+        }
+        case ID_TRAY_EXIT:
+        {
+            PostMessage(hwnd, WM_CLOSE, 0, 0);
+            break;
+        }
+        }
+        return 0;
+    }
+    case WM_DESTROY:
+    {
+        Shell_NotifyIcon(NIM_DELETE, &appData->_TrayIconData);
+        PostQuitMessage(0);
+        return 0;
+    }
+    }
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
 static DWORD KbHookCb(LPVOID param)
 {
     (void)param;
@@ -2102,6 +2194,12 @@ static DWORD KbHookCb(LPVOID param)
 
 int StartAltAppSwitcher(HINSTANCE hInstance)
 {
+    // Hide console window for background tray application
+    HWND consoleWindow = GetConsoleWindow();
+    if (consoleWindow != NULL) {
+        ShowWindow(consoleWindow, SW_HIDE);
+    }
+    
     SetLastError(0);
     ASSERT(SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS));
 
@@ -2127,6 +2225,18 @@ int StartAltAppSwitcher(HINSTANCE hInstance)
         RegisterClass(&wc);
     }
 
+    // Register tray window class
+    {
+        WNDCLASS wc = { };
+        wc.lpfnWndProc   = TrayWindowProc;
+        wc.hInstance     = hInstance;
+        wc.lpszClassName = TRAY_CLASS_NAME;
+        wc.cbWndExtra = sizeof(SAppData*);
+        wc.style = 0;
+        wc.hbrBackground = NULL;
+        RegisterClass(&wc);
+    }
+
     {
         WNDCLASS wc = { };
         wc.lpfnWndProc   = WorkerWindowProc;
@@ -2142,6 +2252,7 @@ int StartAltAppSwitcher(HINSTANCE hInstance)
         _AppData._Mode = ModeNone;
         _AppData._Selection = 0;
         _AppData._MainWin = NULL;
+        _AppData._TrayWin = NULL;
         _AppData._Instance = hInstance;
         _AppData._WinGroups._Size = 0;
         MEM_INIT(_AppData._WinGroups);
@@ -2199,6 +2310,17 @@ int StartAltAppSwitcher(HINSTANCE hInstance)
         }
         InitGraphicsResources(&_AppData._GraphicsResources, &_AppData._Config);
     }
+
+    // Create hidden tray window
+    _AppData._TrayWin = CreateWindowEx(
+        0,
+        TRAY_CLASS_NAME,
+        "AltAppSwitcher Tray",
+        0, // Hidden window
+        CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,
+        NULL, NULL, hInstance, &_AppData
+    );
+    ASSERT(_AppData._TrayWin);
 
     HANDLE threadKbHook = CreateRemoteThread(GetCurrentProcess(), NULL, 0, *KbHookCb, (void*)&_AppData, 0, NULL);
     (void)threadKbHook;
@@ -2329,6 +2451,14 @@ int StartAltAppSwitcher(HINSTANCE hInstance)
             closeAAS = true;
             break;
         }
+        case WM_CLOSE:
+        {
+            if (msg.hwnd == _AppData._TrayWin)
+            {
+                closeAAS = true;
+            }
+            break;
+        }
         }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
@@ -2340,8 +2470,15 @@ int StartAltAppSwitcher(HINSTANCE hInstance)
         DeInitGraphicsResources(&_AppData._GraphicsResources);
     }
 
+    // Clean up tray window
+    if (_AppData._TrayWin)
+    {
+        DestroyWindow(_AppData._TrayWin);
+    }
+
     GdiplusShutdown(gdiplusToken);
     UnregisterClass(CLASS_NAME, hInstance);
+    UnregisterClass(TRAY_CLASS_NAME, hInstance);
 
     if (restartAAS)
     {
