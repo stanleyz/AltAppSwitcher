@@ -66,7 +66,7 @@ COMMONOBJECTS = $(ERROROBJECTS) $(FILEOBJECTS) $(MSGOBJECTS) $(SDKOBJECTS)
 
 AASLIBS = -l dwmapi -l user32 -l gdi32 -l gdiplus -l shlwapi -l pthread -l ole32 -l comctl32 -l shell32 -l uuid -l oleaut32 -l kernel32 -l rpcrt4
 SETTINGSLIB = -l comctl32 -l gdi32
-UPDATERLIBS = -l zip -l zlib -l bcrypt -l curl -l curl.dll
+UPDATERLIBS = -l zip -l zlib -l bcrypt -l curl -l curl.dll -l msvcrt-os
 
 AASASSETS = $(patsubst $(ROOTDIR)/Assets/AAS/%, $(AASBUILDDIR)/%, $(wildcard $(ROOTDIR)/Assets/AAS/*))
 DLL = $(patsubst $(ROOTDIR)/SDK/Dll/$(ARCH)/%, $(AASBUILDDIR)/%, $(wildcard $(ROOTDIR)/SDK/Dll/$(ARCH)/*))
@@ -85,7 +85,7 @@ AASARCHIVE = $(OUTPUTDIR)/Deploy/AltAppSwitcher_$(ARCH).zip
 
 COMPILECOMMANDS = $(SOURCEDIR)/compile_commands.json
 
-default: directories $(ALLAAS) $(COMPILECOMMANDS)
+default: directories $(ALLAAS)
 
 deploy: default $(AASARCHIVE)
 

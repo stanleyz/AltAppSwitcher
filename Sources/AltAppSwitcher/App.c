@@ -319,6 +319,11 @@ static const char* WindowsClassNamesToSkip[] =
 static BOOL GetProcessFileName(DWORD PID, char* outFileName)
 {
     const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, PID);
+    if (process == NULL)
+    {
+        outFileName[0] = '\0';
+        return false;
+    }
     GetModuleFileNameEx(process, NULL, outFileName, 512);
     CloseHandle(process);
     return true;
@@ -574,6 +579,58 @@ static bool IsAltTabWindow(HWND hwnd)
     return true;
 }
 
+static bool WindowTitleContains(HWND hwnd, const wchar_t* needle)
+{
+    wchar_t title[MAX_PATH];
+    title[0] = L'\0';
+    GetWindowTextW(hwnd, title, MAX_PATH);
+    return title[0] != L'\0' && wcsstr(title, needle) != NULL;
+}
+
+static bool IsLikelyAuxiliaryGroupWindow(HWND hwnd, const char* moduleFileName)
+{
+    WINDOWINFO wi = {};
+    wi.cbSize = sizeof(WINDOWINFO);
+    if (!GetWindowInfo(hwnd, &wi))
+        return true;
+
+    RECT rect = {};
+    if (!GetWindowRect(hwnd, &rect))
+        return true;
+
+    const LONG width = rect.right - rect.left;
+    const LONG height = rect.bottom - rect.top;
+    const bool smallWindow = width > 0 && height > 0 && width <= 500 && height <= 220;
+    const bool ownedWindow = GetWindow(hwnd, GW_OWNER) != NULL || GetAncestor(hwnd, GA_ROOTOWNER) != hwnd;
+    const bool popupOnly = (wi.dwStyle & WS_POPUP) != 0 && (wi.dwStyle & WS_CAPTION) == 0;
+    const bool topMost = (wi.dwExStyle & WS_EX_TOPMOST) != 0;
+    const bool toolWindow = (wi.dwExStyle & WS_EX_TOOLWINDOW) != 0;
+
+    if (!strcmp(moduleFileName, "chrome.exe") && WindowTitleContains(hwnd, L"Picture in picture"))
+        return true;
+
+    if (!strcmp(moduleFileName, "slack.exe") && smallWindow && (topMost || popupOnly || ownedWindow))
+        return true;
+
+    return smallWindow && (toolWindow || popupOnly || ownedWindow || topMost);
+}
+
+static HWND GetPreferredGroupWindow(const SWinGroup* winGroup)
+{
+    HWND fallback = NULL;
+    for (uint32_t i = 0; i < winGroup->_WindowCount; i++)
+    {
+        HWND hwnd = winGroup->_Windows[i];
+        if (!IsWindow(hwnd))
+            continue;
+        if (fallback == NULL)
+            fallback = hwnd;
+        if (!IsLikelyAuxiliaryGroupWindow(hwnd, winGroup->_ModuleFileName))
+            return hwnd;
+    }
+    return fallback;
+}
+
 static void LoadIndirectString(const wchar_t* packagePath, const wchar_t* packageName, const wchar_t* resource, wchar_t* output)
 {
     static wchar_t indirectStr[512];
@@ -621,6 +678,13 @@ static void GetUWPIconAndAppName(HANDLE process, wchar_t* outIconPath, wchar_t* 
 
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
+    IStream* inputStream = NULL;
+    IAppxFactory* appxfac = NULL;
+    IAppxManifestReader* reader = NULL;
+    IAppxManifestApplicationsEnumerator* appEnum = NULL;
+    IAppxManifestApplication* app = NULL;
+    HANDLE hFind = INVALID_HANDLE_VALUE;
+
     PACKAGE_ID pid[32];
     uint32_t pidSize = sizeof(pid);
     GetPackageId(process, &pidSize, (BYTE*)pid);
@@ -647,7 +711,6 @@ static void GetUWPIconAndAppName(HANDLE process, wchar_t* outIconPath, wchar_t* 
     wchar_t* displayName = NULL;
     {
         // Stream
-        IStream* inputStream = NULL;
         HRESULT res = SHCreateStreamOnFileEx(
                     manifestPath,
                     STGM_READ | STGM_SHARE_EXCLUSIVE,
@@ -656,10 +719,9 @@ static void GetUWPIconAndAppName(HANDLE process, wchar_t* outIconPath, wchar_t* 
                     NULL, // no template
                     &inputStream);
         if (!SUCCEEDED(res))
-            return;
+            goto cleanup;
 
 
-        IAppxFactory* appxfac = NULL;
         // Appxfactory:
         // CLSID_AppxFactory and IID_IAppxFactory are declared as extern in "AppxPackaging.h"
         // I don't know where the symbols are defined, thus the hardcoded GUIDs here.
@@ -669,26 +731,28 @@ static void GetUWPIconAndAppName(HANDLE process, wchar_t* outIconPath, wchar_t* 
         IIDFromString(L"{beb94909-e451-438b-b5a7-d79e767b75d8}", &iid);
         res = CoCreateInstance(&clsid, NULL, CLSCTX_INPROC_SERVER, &iid, (void**)&appxfac);
         if (!SUCCEEDED(res))
-            return;
+            goto cleanup;
 
         // Manifest reader
-        IAppxManifestReader* reader = NULL;
         res = IAppxFactory_CreateManifestReader(appxfac, inputStream, (IAppxManifestReader**)&reader);
         if (!SUCCEEDED(res))
-            return;
+            goto cleanup;
 
         // App enumerator
-        IAppxManifestApplicationsEnumerator* appEnum = NULL;
         res = IAppxManifestReader_GetApplications(reader, &appEnum);
         if (!SUCCEEDED(res))
-            return;
+            goto cleanup;
 
-        IAppxManifestApplication* app = NULL;
         BOOL hasApp = false;
         IAppxManifestApplicationsEnumerator_GetHasCurrent(appEnum, &hasApp);
         while (hasApp)
         {
             static wchar_t* aumid = NULL;
+            if (app != NULL)
+            {
+                IAppxManifestApplication_Release(app);
+                app = NULL;
+            }
             IAppxManifestApplicationsEnumerator_GetCurrent(appEnum, &app);
             IAppxManifestApplication_GetAppUserModelId(app, &aumid);
             if (!wcscmp(aumid, userModelID))
@@ -699,18 +763,10 @@ static void GetUWPIconAndAppName(HANDLE process, wchar_t* outIconPath, wchar_t* 
             }
             IAppxManifestApplicationsEnumerator_MoveNext(appEnum, &hasApp);
         }
-
-        IAppxManifestApplicationsEnumerator_Release(appEnum);
-        IAppxManifestReader_Release(reader);
-        IAppxFactory_Release(appxfac);
-        IStream_Release(inputStream);
         VERIFY(logoProp != NULL);
         VERIFY(displayName != NULL);
         if (logoProp == NULL || displayName == NULL)
-        {
-            CoUninitialize();
-            return;
-        }
+            goto cleanup;
     }
     for (uint32_t i = 0; logoProp[i] != L'\0'; i++)
     {
@@ -748,14 +804,10 @@ static void GetUWPIconAndAppName(HANDLE process, wchar_t* outIconPath, wchar_t* 
     wcscpy(ext, wcsrchr(logoProp, L'.'));
 
     WIN32_FIND_DATAW findData;
-    HANDLE hFind = INVALID_HANDLE_VALUE;
     hFind = FindFirstFileW(parentDirStar, &findData);
 
     if (hFind == INVALID_HANDLE_VALUE)
-    {
-        CoUninitialize();
-        return;
-    }
+        goto cleanup;
 
     uint32_t maxSize = 0;
     bool foundAny = false;
@@ -806,6 +858,19 @@ static void GetUWPIconAndAppName(HANDLE process, wchar_t* outIconPath, wchar_t* 
         iconMap->_Head = Modulo(iconMap->_Head + 1, UWPICONMAPSIZE);
     }
 
+cleanup:
+    if (hFind != INVALID_HANDLE_VALUE)
+        FindClose(hFind);
+    if (app != NULL)
+        IAppxManifestApplication_Release(app);
+    if (appEnum != NULL)
+        IAppxManifestApplicationsEnumerator_Release(appEnum);
+    if (reader != NULL)
+        IAppxManifestReader_Release(reader);
+    if (appxfac != NULL)
+        IAppxFactory_Release(appxfac);
+    if (inputStream != NULL)
+        IStream_Release(inputStream);
     CoUninitialize();
 }
 
@@ -1022,7 +1087,8 @@ static BOOL FillWinGroups(HWND hwnd, LPARAM lParam)
 
     FindActualPID(hwnd, &PID);
     static char moduleFileName[512];
-    GetProcessFileName(PID, moduleFileName);
+    if (!GetProcessFileName(PID, moduleFileName))
+        return true;
 
     ATOM winClass = IsRunWindow(hwnd) ? 0x8002 : 0; // Run
 
@@ -1053,7 +1119,8 @@ static BOOL FillWinGroups(HWND hwnd, LPARAM lParam)
                     // If caption differs, set group caption to null string
                     group->_Caption[0] = L'\0';
                 }
-                group->_Windows[group->_WindowCount++] = hwnd;
+                if (group->_WindowCount < sizeof(group->_Windows) / sizeof(group->_Windows[0]))
+                    group->_Windows[group->_WindowCount++] = hwnd;
                 return true;
             }
         }
@@ -1064,20 +1131,23 @@ static BOOL FillWinGroups(HWND hwnd, LPARAM lParam)
     {
         const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, PID);
         if (!process)
+            return true;
+        HANDLE tok = NULL;
+        bool elevated = false;
+        if (OpenProcessToken(process, TOKEN_QUERY, &tok))
+        {
+        TOKEN_ELEVATION elTok;
+        DWORD cbSize = sizeof(TOKEN_ELEVATION);
+            if (GetTokenInformation(tok, TokenElevation, &elTok, sizeof(elTok), &cbSize))
+                elevated = elTok.TokenIsElevated;
+            CloseHandle(tok);
+        }
+
+        if (elevated && !appData->_Elevated)
         {
             CloseHandle(process);
             return true;
         }
-        HANDLE tok;
-        OpenProcessToken(process, TOKEN_QUERY, &tok);
-        TOKEN_ELEVATION elTok;
-        DWORD cbSize = sizeof(TOKEN_ELEVATION);
-        GetTokenInformation(tok, TokenElevation, &elTok, sizeof(elTok), &cbSize);
-        bool elevated = elTok.TokenIsElevated;
-        CloseHandle(tok);
-
-        if (elevated && !appData->_Elevated)
-            return true;
 
         group = &winAppGroupArr->_Data[winAppGroupArr->_Size++];
         strcpy(group->_ModuleFileName, moduleFileName);
@@ -1167,7 +1237,8 @@ static BOOL FillWinGroups(HWND hwnd, LPARAM lParam)
         CloseHandle(process);
     }
 
-    group->_Windows[group->_WindowCount++] = hwnd;
+    if (group->_WindowCount < sizeof(group->_Windows) / sizeof(group->_Windows[0]))
+        group->_Windows[group->_WindowCount++] = hwnd;
     return true;
 }
 
@@ -1183,8 +1254,11 @@ static BOOL FillCurrentWinGroup(HWND hwnd, LPARAM lParam)
     ATOM winClass = IsRunWindow(hwnd) ? 0x8002 : 0; // Run
     if (strcmp(moduleFileName, currentWinGroup->_ModuleFileName) || currentWinGroup->_WinClass != winClass)
         return true;
-    currentWinGroup->_Windows[currentWinGroup->_WindowCount] = hwnd;
-    currentWinGroup->_WindowCount++;
+    if (currentWinGroup->_WindowCount < sizeof(currentWinGroup->_Windows) / sizeof(currentWinGroup->_Windows[0]))
+    {
+        currentWinGroup->_Windows[currentWinGroup->_WindowCount] = hwnd;
+        currentWinGroup->_WindowCount++;
+    }
     return true;
 }
 
@@ -1407,6 +1481,7 @@ static void ApplySwitchApp(const SWinGroup* winGroup)
     DWORD ret; (void)ret;
 
     int winCount = (int)winGroup->_WindowCount;
+    const HWND preferredWin = GetPreferredGroupWindow(winGroup);
     
     // Cache window thread IDs to avoid repeated GetWindowThreadProcessId calls
     DWORD windowThreads[64];
@@ -1446,7 +1521,7 @@ static void ApplySwitchApp(const SWinGroup* winGroup)
     if (isUWPApp && winCount > 0)
     {
         // For UWP apps, just bring the main window to front and set focus
-        const HWND mainWin = winGroup->_Windows[Modulo(1, winCount)];
+        const HWND mainWin = preferredWin != NULL ? preferredWin : winGroup->_Windows[0];
         if (IsWindow(mainWin)) {
             SetWindowPos(mainWin, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
             SetForegroundWindow(mainWin);
@@ -1486,6 +1561,18 @@ static void ApplySwitchApp(const SWinGroup* winGroup)
         ret = EndDeferWindowPos(dwp);
     }
 
+    if (preferredWin != NULL && IsWindow(preferredWin))
+    {
+        const DWORD targetWinThread = GetWindowThreadProcessId(preferredWin, NULL);
+        if (targetWinThread != 0 && targetWinThread != curThread)
+            AttachThreadInput(targetWinThread, curThread, TRUE);
+        BringWindowToTop(preferredWin);
+        SetForegroundWindow(preferredWin);
+        SetFocus(preferredWin);
+        if (targetWinThread != 0 && targetWinThread != curThread)
+            AttachThreadInput(targetWinThread, curThread, FALSE);
+    }
+
     // Detach thread inputs
     for (int i = winCount - 1; i >= 0 ; i--)
     {
@@ -1505,9 +1592,10 @@ static DWORD WorkerThread(LPVOID data)
 {
     SAppData* appData = (SAppData*)data;
 
-    HANDLE window = CreateWindowEx(WS_EX_TOPMOST, WORKER_CLASS_NAME, NULL, WS_POPUP,
+    HWND window = CreateWindowEx(WS_EX_TOPMOST, WORKER_CLASS_NAME, NULL, WS_POPUP,
         0, 0, 0, 0, HWND_MESSAGE, NULL, appData->_Instance,appData);
-    (void)window;
+    if (window == NULL)
+        return 0;
 
     EnterCriticalSection(&appData->_WorkerCS);
     appData->_WorkerWin = window;
@@ -1589,6 +1677,8 @@ static void ApplyWithTimeout(SAppData* appData, unsigned int msg)
     
     if (!workerReady) {
         // Worker thread failed to initialize, use direct approach
+        PostThreadMessage(tid, WM_QUIT, 0, 0);
+        WaitForSingleObject(ht, 500);
         CloseHandle(ht);
         if (msg == MSG_APPLY_APP) {
             ApplySwitchApp(&appData->_WinGroups._Data[appData->_Selection]);
@@ -1621,8 +1711,9 @@ static void ApplyWithTimeout(SAppData* appData, unsigned int msg)
         Sleep(10);
     }
 
+    PostThreadMessage(tid, WM_QUIT, 0, 0);
     // Wait for thread to complete with timeout
-    WaitForSingleObject(ht, 200); // 200ms max wait
+    WaitForSingleObject(ht, 500);
     CloseHandle(ht);
 }
 #endif
@@ -2322,8 +2413,9 @@ int StartAltAppSwitcher(HINSTANCE hInstance)
     );
     ASSERT(_AppData._TrayWin);
 
-    HANDLE threadKbHook = CreateRemoteThread(GetCurrentProcess(), NULL, 0, *KbHookCb, (void*)&_AppData, 0, NULL);
-    (void)threadKbHook;
+    HANDLE threadKbHook = CreateThread(NULL, 0, *KbHookCb, (void*)&_AppData, 0, NULL);
+    if (threadKbHook != NULL)
+        CloseHandle(threadKbHook);
 
     (AllowSetForegroundWindow(GetCurrentProcessId()));
 

@@ -6,7 +6,25 @@
         {
             "label": "Build x86_64 Debug",
             "type": "shell",
-            "command": "start ./Kill.bat; mingw32-make ARCH=x86_64 CONF=Debug"
+            "command": "make",
+            "args": [
+                "ARCH=x86_64",
+                "CONF=Debug"
+            ],
+            "linux": {
+                "command": "make",
+                "args": [
+                    "ARCH=x86_64",
+                    "CONF=Debug"
+                ]
+            },
+            "windows": {
+                "command": "start ./Kill.bat && mingw32-make",
+                "args": [
+                    "ARCH=x86_64",
+                    "CONF=Debug"
+                ]
+            }
         }
     ]
 }

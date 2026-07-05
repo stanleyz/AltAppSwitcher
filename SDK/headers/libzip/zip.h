@@ -44,6 +44,14 @@ extern "C" {
 
 #include "zipconf.h"
 
+#ifndef _Nullable
+#define _Nullable
+#endif
+
+#ifndef _Nonnull
+#define _Nonnull
+#endif
+
 #ifndef ZIP_EXTERN
 #ifndef ZIP_STATIC
 #ifdef _WIN32
